@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Search, Globe, Server, Shield, MapPin, Copy, Check, Loader2, AlertCircle, Lock, Mail, Clock, Download, ChevronDown, ChevronUp, AlertTriangle, CheckCircle, XCircle, Info, History, Trash2 } from 'lucide-react';
+import { Search, Globe, Server, Shield, MapPin, Copy, Check, Loader2, AlertCircle, Lock, Mail, Clock, Download, ChevronDown, ChevronUp, AlertTriangle, CheckCircle, XCircle, Info, History, Trash2, Users, ArrowRight } from 'lucide-react';
 
 export default function Home() {
   const [query, setQuery] = useState('');
@@ -64,7 +64,28 @@ export default function Home() {
     return <div className="bg-gray-50 rounded-xl overflow-hidden"><button onClick={() => toggle(id)} className="w-full flex items-center justify-between p-4 hover:bg-gray-100"><h3 className="font-semibold text-gray-900 flex items-center gap-2"><Icon size={16} className={color}/> {title}</h3>{isOpen ? <ChevronUp size={16} className="text-gray-400"/> : <ChevronDown size={16} className="text-gray-400"/>}</button>{isOpen && <div className="px-4 pb-4">{children}</div>}</div>;
   };
 
-  const tabs = results?.isIP ? [{ id: 'ip', label: 'IP Info', icon: MapPin }, { id: 'security', label: 'Security', icon: Shield }] : [{ id: 'whois', label: 'WHOIS', icon: Globe }, { id: 'dns', label: 'DNS', icon: Server }, { id: 'ssl', label: 'SSL', icon: Lock }, { id: 'security', label: 'Security', icon: Shield }, { id: 'email', label: 'Email', icon: Mail }, { id: 'ip', label: 'Hosting', icon: MapPin }];
+  // Count blacklisted entries
+  const blacklistCount = results?.blacklists?.filter((b: any) => b.listed).length || 0;
+  const subdomainCount = results?.subdomains?.length || 0;
+  const sharedHostingCount = results?.sharedHosting?.length || 0;
+
+  const tabs = results?.isIP 
+    ? [
+        { id: 'ip', label: 'IP Info', icon: MapPin }, 
+        { id: 'blacklist', label: `Blacklist${blacklistCount > 0 ? ` (${blacklistCount})` : ''}`, icon: Shield },
+        { id: 'network', label: 'Network WHOIS', icon: Server },
+        { id: 'shared', label: `Shared Hosting${sharedHostingCount > 0 ? ` (${sharedHostingCount})` : ''}`, icon: Users },
+        { id: 'security', label: 'Security', icon: Shield }
+      ] 
+    : [
+        { id: 'whois', label: 'WHOIS', icon: Globe }, 
+        { id: 'dns', label: 'DNS', icon: Server }, 
+        { id: 'ssl', label: 'SSL', icon: Lock }, 
+        { id: 'security', label: 'Security', icon: Shield }, 
+        { id: 'email', label: 'Email', icon: Mail }, 
+        { id: 'ip', label: 'Hosting', icon: MapPin },
+        { id: 'subdomains', label: `Subdomains${subdomainCount > 0 ? ` (${subdomainCount})` : ''}`, icon: Globe }
+      ];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-4 md:p-8">
@@ -143,6 +164,20 @@ export default function Home() {
                   {results.security.score !== undefined && <div className="bg-gray-50 rounded-xl p-4"><div className="flex items-center gap-4"><div className={`text-4xl font-bold ${results.security.score>=80?'text-green-600':results.security.score>=50?'text-yellow-600':'text-red-600'}`}>{results.security.score}/100</div><div className="flex-1"><div className="text-sm text-gray-600 mb-1">Security Score</div><div className="w-full bg-gray-200 rounded-full h-3"><div className={`h-3 rounded-full ${results.security.score>=80?'bg-green-500':results.security.score>=50?'bg-yellow-500':'bg-red-500'}`} style={{width:`${results.security.score}%`}}/></div></div></div></div>}
                   <Section id="sec-h" title="Security Headers" icon={Shield}>{Object.entries(results.security.headers||{}).map(([k,d]:any)=><div key={k} className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0"><span className="text-gray-700 text-sm">{k}</span><Badge status={d.present?'good':'warning'} text={d.present?'Present':'Missing'}/></div>)}</Section>
                   {results.security.technologies?.length>0 && <Section id="tech" title="Technologies" icon={Server} color="text-purple-500"><div className="flex flex-wrap gap-2">{results.security.technologies.map((t:string,i:number)=><span key={i} className="text-sm bg-blue-100 text-blue-700 px-3 py-1 rounded-full">{t}</span>)}</div></Section>}
+                  
+                  {/* Blacklist info for domain lookups */}
+                  {!results.isIP && results.blacklists && results.blacklists.length > 0 && (
+                    <Section id="sec-bl" title="IP Blacklist Status" icon={Shield} color="text-red-500">
+                      <div className="space-y-2">
+                        {results.blacklists.map((bl: any, i: number) => (
+                          <div key={i} className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0">
+                            <span className="text-gray-700 text-sm">{bl.name}</span>
+                            <Badge status={bl.listed ? 'bad' : 'good'} text={bl.listed ? 'Listed' : 'Clean'} />
+                          </div>
+                        ))}
+                      </div>
+                    </Section>
+                  )}
                 </div>
               )}
 
@@ -163,6 +198,136 @@ export default function Home() {
                 <div className="grid md:grid-cols-2 gap-4">
                   <Section id="loc" title="Location" icon={MapPin} color="text-red-500"><Row label="IP" value={results.ip.ip} k="ip"/><Row label="City" value={results.ip.city} k="city"/><Row label="Region" value={results.ip.region} k="region"/><Row label="Country" value={results.ip.country} k="country"/><Row label="Postal" value={results.ip.postal} k="postal"/><Row label="Timezone" value={results.ip.timezone} k="tz"/>{results.ip.lat&&results.ip.lon&&<Row label="Coords" value={`${results.ip.lat}, ${results.ip.lon}`} k="coords"/>}{results.ip.reverseDns&&<Row label="rDNS" value={results.ip.reverseDns} k="rdns"/>}</Section>
                   <Section id="net" title="Network" icon={Server} color="text-purple-500"><Row label="ISP" value={results.ip.isp} k="isp"/><Row label="Org" value={results.ip.org} k="org"/><Row label="ASN" value={results.ip.asn} k="asn"/>{results.ip.isHosting!==undefined&&<div className="flex justify-between items-center py-2 border-b border-gray-100"><span className="text-gray-500 text-sm">Type</span><Badge status="info" text={results.ip.isHosting?'Datacenter':'Residential'}/></div>}{results.ip.isProxy&&<div className="flex justify-between items-center py-2"><span className="text-gray-500 text-sm">Proxy/VPN</span><Badge status="warning" text="Detected"/></div>}</Section>
+                  
+                  {/* Redirects section for domain lookups */}
+                  {!results.isIP && results.redirects && results.redirects.length > 0 && (
+                    <Section id="redirects" title={`Redirects (${results.redirects.length} hops)`} icon={ArrowRight} color="text-orange-500">
+                      <div className="space-y-2">
+                        {results.redirects.map((r: any, i: number) => (
+                          <div key={i} className="flex items-center gap-2 py-2 border-b border-gray-100 last:border-0">
+                            <span className={`text-xs px-2 py-0.5 rounded font-mono ${r.status >= 300 && r.status < 400 ? 'bg-yellow-100 text-yellow-700' : r.status >= 200 && r.status < 300 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>{r.status}</span>
+                            <code className="text-xs text-gray-600 break-all flex-1">{r.url}</code>
+                            {i < results.redirects.length - 1 && <ArrowRight size={12} className="text-gray-400 flex-shrink-0" />}
+                          </div>
+                        ))}
+                      </div>
+                    </Section>
+                  )}
+                  
+                  {/* Shared Hosting section for domain lookups */}
+                  {!results.isIP && results.sharedHosting && results.sharedHosting.length > 0 && (
+                    <Section id="shared-hosting" title={`Shared Hosting (${results.sharedHosting.length} domains)`} icon={Users} color="text-blue-500">
+                      <div className="max-h-48 overflow-y-auto">
+                        {results.sharedHosting.slice(0, 20).map((domain: string, i: number) => (
+                          <div key={i} className="flex justify-between items-center py-1.5 border-b border-gray-100 last:border-0">
+                            <span className="text-gray-700 text-sm">{domain}</span>
+                            <CopyBtn text={domain} k={`shared-${i}`} />
+                          </div>
+                        ))}
+                        {results.sharedHosting.length > 20 && (
+                          <p className="text-gray-400 text-xs py-2 text-center">+{results.sharedHosting.length - 20} more domains</p>
+                        )}
+                      </div>
+                    </Section>
+                  )}
+                </div>
+              )}
+
+              {/* Subdomains tab for domain lookups */}
+              {activeTab === 'subdomains' && !results.isIP && (
+                <div className="space-y-4">
+                  <Section id="subdomains" title={`Discovered Subdomains (${results.subdomains?.length || 0})`} icon={Globe} color="text-green-500">
+                    {results.subdomains?.length > 0 ? (
+                      <div className="max-h-96 overflow-y-auto">
+                        <div className="grid md:grid-cols-2 gap-x-4">
+                          {results.subdomains.map((sub: string, i: number) => (
+                            <div key={i} className="flex justify-between items-center py-1.5 border-b border-gray-100 last:border-0">
+                              <span className="text-gray-700 text-sm font-mono">{sub}</span>
+                              <CopyBtn text={sub} k={`sub-${i}`} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 text-sm py-4 text-center">No subdomains discovered via Certificate Transparency logs</p>
+                    )}
+                  </Section>
+                  <p className="text-gray-400 text-xs text-center">Data sourced from crt.sh Certificate Transparency logs</p>
+                </div>
+              )}
+
+              {/* Blacklist tab for IP lookups */}
+              {activeTab === 'blacklist' && results.isIP && (
+                <div className="space-y-4">
+                  <Section id="blacklists" title="DNS Blacklist Check" icon={Shield} color="text-red-500">
+                    {results.blacklists?.length > 0 ? (
+                      <div className="space-y-2">
+                        {results.blacklists.map((bl: any, i: number) => (
+                          <div key={i} className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0">
+                            <div>
+                              <span className="text-gray-700 text-sm font-medium">{bl.name}</span>
+                              <span className="text-gray-400 text-xs ml-2">({bl.host})</span>
+                            </div>
+                            <Badge status={bl.listed ? 'bad' : 'good'} text={bl.listed ? 'Listed' : 'Clean'} />
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 text-sm py-4 text-center">No blacklist data available</p>
+                    )}
+                  </Section>
+                  <div className="bg-gray-50 rounded-xl p-4 text-center">
+                    <div className={`text-2xl font-bold ${blacklistCount === 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {blacklistCount === 0 ? '✓ Clean' : `⚠ Listed on ${blacklistCount} blacklist${blacklistCount > 1 ? 's' : ''}`}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Network WHOIS tab for IP lookups */}
+              {activeTab === 'network' && results.isIP && (
+                <div className="space-y-4">
+                  <Section id="ip-whois" title="RIR Registration Data" icon={Server} color="text-purple-500">
+                    {results.ipWhois ? (
+                      <>
+                        <Row label="Network Name" value={results.ipWhois.name} k="net-name" />
+                        <Row label="Handle" value={results.ipWhois.handle} k="net-handle" />
+                        <Row label="CIDR / Range" value={results.ipWhois.cidr} k="net-cidr" />
+                        <Row label="Country" value={results.ipWhois.country} k="net-country" />
+                        <Row label="Type" value={results.ipWhois.type} k="net-type" />
+                        <Row label="Organization" value={results.ipWhois.organization} k="net-org" />
+                        {results.ipWhois.abuseContact && <Row label="Abuse Contact" value={results.ipWhois.abuseContact} k="net-abuse" />}
+                        {results.ipWhois.registrationDate && <Row label="Registered" value={fmtDate(results.ipWhois.registrationDate)} k="net-reg" />}
+                        {results.ipWhois.lastChanged && <Row label="Last Changed" value={fmtDate(results.ipWhois.lastChanged)} k="net-changed" />}
+                        {results.ipWhois.parentHandle && <Row label="Parent Handle" value={results.ipWhois.parentHandle} k="net-parent" />}
+                      </>
+                    ) : (
+                      <p className="text-gray-500 text-sm py-4 text-center">No RIR data available</p>
+                    )}
+                  </Section>
+                </div>
+              )}
+
+              {/* Shared Hosting tab for IP lookups */}
+              {activeTab === 'shared' && results.isIP && (
+                <div className="space-y-4">
+                  <Section id="shared" title={`Domains on this IP (${results.sharedHosting?.length || 0})`} icon={Users} color="text-blue-500">
+                    {results.sharedHosting?.length > 0 ? (
+                      <div className="max-h-96 overflow-y-auto">
+                        <div className="grid md:grid-cols-2 gap-x-4">
+                          {results.sharedHosting.map((domain: string, i: number) => (
+                            <div key={i} className="flex justify-between items-center py-1.5 border-b border-gray-100 last:border-0">
+                              <span className="text-gray-700 text-sm">{domain}</span>
+                              <CopyBtn text={domain} k={`ip-shared-${i}`} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 text-sm py-4 text-center">No other domains found on this IP</p>
+                    )}
+                  </Section>
+                  <p className="text-gray-400 text-xs text-center">Data sourced from HackerTarget reverse IP lookup</p>
                 </div>
               )}
             </div>

@@ -5,6 +5,7 @@ import * as tls from 'tls';
 const isIP = (s: string) => /^(\d{1,3}\.){3}\d{1,3}$/.test(s.trim());
 const extractDomain = (s: string) => s.trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0].split('?')[0];
 const calcAge = (c: string) => { try { const d = new Date(c); if (isNaN(d.getTime())) return null; const y = Math.floor((Date.now()-d.getTime())/(365.25*24*60*60*1000)); const m = Math.floor(((Date.now()-d.getTime())%(365.25*24*60*60*1000))/(30.44*24*60*60*1000)); return y>0?`${y}y ${m}m old`:`${m}m old`; } catch { return null; } };
+const reverseIP = (ip: string) => ip.split('.').reverse().join('.');
 
 async function fetchDNS(domain: string) {
   const types = ['A','AAAA','MX','NS','TXT','CAA'] as const;
@@ -105,21 +106,211 @@ async function fetchIPInfo(ip: string) {
 
 async function resolveIP(domain: string) { try { const r=await fetch(`https://dns.google/resolve?name=${domain}&type=A`); const d=await r.json(); return d.Answer?.find((a:any)=>a.type===1)?.data||null; } catch { return null; } }
 
+// NEW: Blacklist Check (DNSBL)
+async function fetchBlacklists(ip: string) {
+  const blacklists = [
+    { name: 'Spamhaus ZEN', host: 'zen.spamhaus.org' },
+    { name: 'SpamCop', host: 'bl.spamcop.net' },
+    { name: 'Barracuda', host: 'b.barracudacentral.org' },
+    { name: 'UCEPROTECT', host: 'dnsbl-1.uceprotect.net' },
+    { name: 'S5H', host: 'all.s5h.net' }
+  ];
+  const reversed = reverseIP(ip);
+  const results: { name: string; host: string; listed: boolean }[] = [];
+  
+  await Promise.all(blacklists.map(async (bl) => {
+    try {
+      const res = await fetch(`https://dns.google/resolve?name=${reversed}.${bl.host}&type=A`);
+      const data = await res.json();
+      // If Status is 0 (NOERROR) and has an Answer, the IP is listed
+      results.push({ name: bl.name, host: bl.host, listed: data.Status === 0 && !!data.Answer?.length });
+    } catch {
+      results.push({ name: bl.name, host: bl.host, listed: false });
+    }
+  }));
+  
+  return results;
+}
+
+// NEW: Shared Hosting / Reverse IP lookup
+async function fetchSharedHosting(ip: string) {
+  try {
+    const res = await fetch(`https://api.hackertarget.com/reverseiplookup/?q=${ip}`, { signal: AbortSignal.timeout(10000) });
+    const text = await res.text();
+    if (text.includes('error') || text.includes('API count exceeded')) return [];
+    const domains = text.split('\n').map(d => d.trim()).filter(d => d && !d.includes('error'));
+    return domains.slice(0, 100); // Limit to 100
+  } catch {
+    return [];
+  }
+}
+
+// NEW: IP WHOIS from RIR (RDAP)
+async function fetchIPWhois(ip: string) {
+  try {
+    const res = await fetch(`https://rdap.org/ip/${ip}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    
+    // Extract relevant fields
+    const findEntity = (roles: string[]) => data.entities?.find((e: any) => e.roles?.some((r: string) => roles.includes(r)));
+    const getVcard = (e: any, field: string) => e?.vcardArray?.[1]?.find((v: any) => v[0] === field)?.[3];
+    
+    const abuseEntity = findEntity(['abuse']);
+    const registrantEntity = findEntity(['registrant']);
+    
+    return {
+      name: data.name || 'N/A',
+      handle: data.handle || 'N/A',
+      cidr: data.cidr0_cidrs?.map((c: any) => `${c.v4prefix || c.v6prefix}/${c.length}`).join(', ') || 
+            (data.startAddress && data.endAddress ? `${data.startAddress} - ${data.endAddress}` : 'N/A'),
+      country: data.country || 'N/A',
+      type: data.type || 'N/A',
+      organization: getVcard(registrantEntity, 'fn') || data.entities?.[0]?.vcardArray?.[1]?.find((v: any) => v[0] === 'fn')?.[3] || 'N/A',
+      abuseContact: getVcard(abuseEntity, 'email') || null,
+      registrationDate: data.events?.find((e: any) => e.eventAction === 'registration')?.eventDate || null,
+      lastChanged: data.events?.find((e: any) => e.eventAction === 'last changed')?.eventDate || null,
+      parentHandle: data.parentHandle || null
+    };
+  } catch {
+    return null;
+  }
+}
+
+// NEW: Certificate Transparency / Subdomain Discovery
+async function fetchSubdomains(domain: string) {
+  try {
+    const res = await fetch(`https://crt.sh/?q=%25.${domain}&output=json`, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    
+    // Extract and deduplicate subdomains
+    const subdomains = new Set<string>();
+    for (const cert of data) {
+      const names = cert.name_value?.split('\n') || [];
+      for (const name of names) {
+        const clean = name.trim().toLowerCase().replace(/^\*\./, '');
+        if (clean && clean.endsWith(domain) && clean !== domain) {
+          subdomains.add(clean);
+        }
+      }
+    }
+    
+    // Sort and limit to 50
+    return Array.from(subdomains).sort().slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
+// NEW: HTTP Redirect Chain
+async function fetchRedirectChain(domain: string) {
+  const chain: { url: string; status: number; location: string | null }[] = [];
+  let currentUrl = `http://${domain}`;
+  const maxHops = 10;
+  
+  try {
+    for (let i = 0; i < maxHops; i++) {
+      const ctrl = new AbortController();
+      const timeout = setTimeout(() => ctrl.abort(), 5000);
+      
+      try {
+        const res = await fetch(currentUrl, { 
+          method: 'HEAD', 
+          redirect: 'manual',
+          signal: ctrl.signal 
+        });
+        clearTimeout(timeout);
+        
+        const location = res.headers.get('location');
+        chain.push({
+          url: currentUrl,
+          status: res.status,
+          location
+        });
+        
+        // If not a redirect, stop
+        if (res.status < 300 || res.status >= 400 || !location) break;
+        
+        // Handle relative URLs
+        if (location.startsWith('/')) {
+          const url = new URL(currentUrl);
+          currentUrl = `${url.protocol}//${url.host}${location}`;
+        } else {
+          currentUrl = location;
+        }
+      } catch (e) {
+        clearTimeout(timeout);
+        // If we can't fetch, just stop
+        break;
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+  
+  return chain;
+}
+
 export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams.get('q');
   if(!q) return NextResponse.json({error:'Missing query'},{ status:400 });
   const input = extractDomain(q), isIp = isIP(input);
   try {
     if(isIp) {
-      const [ip,security] = await Promise.all([fetchIPInfo(input),fetchSecurityHeaders(input).catch(()=>null)]);
-      return NextResponse.json({query:input,isIP:true,ip,security});
+      const [ip, security, blacklists, sharedHosting, ipWhois] = await Promise.all([
+        fetchIPInfo(input),
+        fetchSecurityHeaders(input).catch(()=>null),
+        fetchBlacklists(input),
+        fetchSharedHosting(input),
+        fetchIPWhois(input)
+      ]);
+      return NextResponse.json({query:input,isIP:true,ip,security,blacklists,sharedHosting,ipWhois});
     } else {
-      const [whois,dns,ssl,security] = await Promise.all([fetchWhois(input),fetchDNS(input),fetchSSL(input),fetchSecurityHeaders(input)]);
+      const [whois,dns,ssl,security,subdomains,redirects] = await Promise.all([
+        fetchWhois(input),
+        fetchDNS(input),
+        fetchSSL(input),
+        fetchSecurityHeaders(input),
+        fetchSubdomains(input),
+        fetchRedirectChain(input)
+      ]);
       if(!whois.nameservers.length && dns.NS?.length) whois.nameservers = dns.NS.map((r:any)=>r.value.replace(/\.$/,'').toLowerCase());
       const email = await fetchEmailAuth(input,dns);
       const resolvedIP = await resolveIP(input);
-      const ip = resolvedIP ? await fetchIPInfo(resolvedIP) : null;
-      return NextResponse.json({query:input,isIP:false,whois,dns,ssl,security,email,ip,resolvedIP,meta:{domainAge:calcAge(whois.created),timestamp:new Date().toISOString()}});
+      
+      // Fetch IP-related data if we have an IP
+      let ip = null;
+      let blacklists: { name: string; host: string; listed: boolean }[] = [];
+      let sharedHosting: string[] = [];
+      let ipWhois = null;
+      
+      if (resolvedIP) {
+        [ip, blacklists, sharedHosting, ipWhois] = await Promise.all([
+          fetchIPInfo(resolvedIP),
+          fetchBlacklists(resolvedIP),
+          fetchSharedHosting(resolvedIP),
+          fetchIPWhois(resolvedIP)
+        ]);
+      }
+      
+      return NextResponse.json({
+        query:input,
+        isIP:false,
+        whois,
+        dns,
+        ssl,
+        security,
+        email,
+        ip,
+        resolvedIP,
+        blacklists,
+        sharedHosting,
+        ipWhois,
+        subdomains,
+        redirects,
+        meta:{domainAge:calcAge(whois.created),timestamp:new Date().toISOString()}
+      });
     }
   } catch(e) { console.error(e); return NextResponse.json({error:'Lookup failed'},{status:500}); }
 }
