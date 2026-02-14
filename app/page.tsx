@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Search, Globe, Server, Shield, MapPin, Copy, Check, Loader2, AlertCircle, Lock, Mail, Clock, Download, ChevronDown, ChevronUp, AlertTriangle, CheckCircle, XCircle, Info, History, Trash2, Users, ArrowRight } from 'lucide-react';
+import { Search, Globe, Server, Shield, MapPin, Copy, Check, Loader2, AlertCircle, Lock, Mail, Clock, Download, ChevronDown, ChevronUp, AlertTriangle, CheckCircle, XCircle, Info, History, Trash2, Users, ArrowRight, Wrench } from 'lucide-react';
 
 export default function Home() {
   const [query, setQuery] = useState('');
@@ -10,6 +10,7 @@ export default function Home() {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expandedFixes, setExpandedFixes] = useState<Record<number, boolean>>({});
   const [history, setHistory] = useState<{query:string,timestamp:number}[]>([]);
   const [showHistory, setShowHistory] = useState(false);
 
@@ -19,6 +20,7 @@ export default function Home() {
   }, []);
 
   const toggle = (id: string) => setExpanded(p => ({ ...p, [id]: !p[id] }));
+  const toggleFix = (idx: number) => setExpandedFixes(p => ({ ...p, [idx]: !p[idx] }));
   const copy = (text: string, key: string) => { navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(''), 2000); };
   const exportJSON = () => { if (!results) return; const b = new Blob([JSON.stringify(results, null, 2)], { type: 'application/json' }); const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = `${results.query}-${Date.now()}.json`; a.click(); };
   const clearHistory = () => { localStorage.removeItem('lookupHistory'); setHistory([]); };
@@ -64,10 +66,11 @@ export default function Home() {
     return <div className="bg-gray-50 rounded-xl overflow-hidden"><button onClick={() => toggle(id)} className="w-full flex items-center justify-between p-4 hover:bg-gray-100"><h3 className="font-semibold text-gray-900 flex items-center gap-2"><Icon size={16} className={color}/> {title}</h3>{isOpen ? <ChevronUp size={16} className="text-gray-400"/> : <ChevronDown size={16} className="text-gray-400"/>}</button>{isOpen && <div className="px-4 pb-4">{children}</div>}</div>;
   };
 
-  // Count blacklisted entries
+  // Count various entries
   const blacklistCount = results?.blacklists?.filter((b: any) => b.listed).length || 0;
   const subdomainCount = results?.subdomains?.length || 0;
   const sharedHostingCount = results?.sharedHosting?.length || 0;
+  const recommendationCount = results?.recommendations?.length || 0;
 
   const tabs = results?.isIP 
     ? [
@@ -75,7 +78,8 @@ export default function Home() {
         { id: 'blacklist', label: `Blacklist${blacklistCount > 0 ? ` (${blacklistCount})` : ''}`, icon: Shield },
         { id: 'network', label: 'Network WHOIS', icon: Server },
         { id: 'shared', label: `Shared Hosting${sharedHostingCount > 0 ? ` (${sharedHostingCount})` : ''}`, icon: Users },
-        { id: 'security', label: 'Security', icon: Shield }
+        { id: 'security', label: 'Security', icon: Shield },
+        { id: 'fixes', label: `Fixes${recommendationCount > 0 ? ` (${recommendationCount})` : ''}`, icon: Wrench }
       ] 
     : [
         { id: 'whois', label: 'WHOIS', icon: Globe }, 
@@ -84,7 +88,8 @@ export default function Home() {
         { id: 'security', label: 'Security', icon: Shield }, 
         { id: 'email', label: 'Email', icon: Mail }, 
         { id: 'ip', label: 'Hosting', icon: MapPin },
-        { id: 'subdomains', label: `Subdomains${subdomainCount > 0 ? ` (${subdomainCount})` : ''}`, icon: Globe }
+        { id: 'subdomains', label: `Subdomains${subdomainCount > 0 ? ` (${subdomainCount})` : ''}`, icon: Globe },
+        { id: 'fixes', label: `Fixes${recommendationCount > 0 ? ` (${recommendationCount})` : ''}`, icon: Wrench }
       ];
 
   return (
@@ -328,6 +333,137 @@ export default function Home() {
                     )}
                   </Section>
                   <p className="text-gray-400 text-xs text-center">Data sourced from HackerTarget reverse IP lookup</p>
+                </div>
+              )}
+
+              {/* Fixes/Recommendations tab */}
+              {activeTab === 'fixes' && (
+                <div className="space-y-4">
+                  {/* Overall Assessment */}
+                  <div className="bg-gradient-to-r from-gray-50 to-gray-100 rounded-xl p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                        <Wrench size={20} className="text-blue-500" />
+                        Security Assessment
+                      </h3>
+                      {results.security?.score !== undefined && (
+                        <div className={`text-2xl font-bold ${results.security.score >= 80 ? 'text-green-600' : results.security.score >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
+                          {results.security.score}/100
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-gray-600 text-sm">
+                      {recommendationCount === 0 ? (
+                        '✓ Excellent! No security issues detected. Your configuration follows best practices.'
+                      ) : recommendationCount <= 3 ? (
+                        `Found ${recommendationCount} recommendation${recommendationCount > 1 ? 's' : ''} to improve your security posture.`
+                      ) : recommendationCount <= 6 ? (
+                        `Found ${recommendationCount} recommendations. Consider addressing the critical and high priority items first.`
+                      ) : (
+                        `Found ${recommendationCount} recommendations. Your security configuration needs attention - start with critical issues.`
+                      )}
+                    </p>
+                    {recommendationCount > 0 && (
+                      <div className="flex gap-2 mt-3 flex-wrap">
+                        {['critical', 'high', 'medium', 'low'].map(sev => {
+                          const count = results.recommendations?.filter((r: any) => r.severity === sev).length || 0;
+                          if (count === 0) return null;
+                          const colors: Record<string, string> = {
+                            critical: 'bg-red-100 text-red-700',
+                            high: 'bg-orange-100 text-orange-700',
+                            medium: 'bg-yellow-100 text-yellow-700',
+                            low: 'bg-blue-100 text-blue-700'
+                          };
+                          return (
+                            <span key={sev} className={`px-2 py-1 rounded-full text-xs font-medium ${colors[sev]}`}>
+                              {count} {sev}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Recommendations List */}
+                  {results.recommendations?.length > 0 ? (
+                    <div className="space-y-3">
+                      {results.recommendations.map((rec: any, idx: number) => {
+                        const severityColors: Record<string, { bg: string; border: string; badge: string; icon: string }> = {
+                          critical: { bg: 'bg-red-50', border: 'border-red-200', badge: 'bg-red-100 text-red-700', icon: 'text-red-500' },
+                          high: { bg: 'bg-orange-50', border: 'border-orange-200', badge: 'bg-orange-100 text-orange-700', icon: 'text-orange-500' },
+                          medium: { bg: 'bg-yellow-50', border: 'border-yellow-200', badge: 'bg-yellow-100 text-yellow-700', icon: 'text-yellow-600' },
+                          low: { bg: 'bg-blue-50', border: 'border-blue-200', badge: 'bg-blue-100 text-blue-700', icon: 'text-blue-500' }
+                        };
+                        const colors = severityColors[rec.severity] || severityColors.low;
+                        const isExpanded = expandedFixes[idx] || false;
+
+                        return (
+                          <div key={idx} className={`rounded-xl border ${colors.border} ${colors.bg} overflow-hidden`}>
+                            <button
+                              onClick={() => toggleFix(idx)}
+                              className="w-full p-4 text-left hover:bg-white/50 transition-colors"
+                            >
+                              <div className="flex items-start gap-3">
+                                <div className={`mt-0.5 ${colors.icon}`}>
+                                  {rec.severity === 'critical' ? <XCircle size={18} /> : 
+                                   rec.severity === 'high' ? <AlertTriangle size={18} /> :
+                                   rec.severity === 'medium' ? <AlertCircle size={18} /> :
+                                   <Info size={18} />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${colors.badge}`}>
+                                      {rec.severity.toUpperCase()}
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-200 text-gray-700">
+                                      {rec.category}
+                                    </span>
+                                  </div>
+                                  <h4 className="font-semibold text-gray-900">{rec.title}</h4>
+                                  <p className="text-sm text-gray-600 mt-1">{rec.description}</p>
+                                  <div className="flex items-center gap-1 mt-2 text-xs text-gray-500">
+                                    <Shield size={12} />
+                                    <span>{rec.impact}</span>
+                                  </div>
+                                </div>
+                                <div className="text-gray-400 flex-shrink-0">
+                                  {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                                </div>
+                              </div>
+                            </button>
+                            
+                            {isExpanded && (
+                              <div className="px-4 pb-4 pt-0">
+                                <div className="bg-gray-900 rounded-lg p-4 relative">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs text-gray-400 font-medium">Fix / Configuration</span>
+                                    <button
+                                      onClick={() => copy(rec.fix, `fix-${idx}`)}
+                                      className="flex items-center gap-1 px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs"
+                                    >
+                                      {copied === `fix-${idx}` ? <Check size={12} /> : <Copy size={12} />}
+                                      {copied === `fix-${idx}` ? 'Copied!' : 'Copy'}
+                                    </button>
+                                  </div>
+                                  <pre className="text-sm text-gray-100 font-mono whitespace-pre-wrap overflow-x-auto">
+                                    {rec.fix}
+                                  </pre>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-8 text-center">
+                      <CheckCircle size={48} className="text-green-500 mx-auto mb-3" />
+                      <h3 className="text-lg font-semibold text-green-800">All Clear!</h3>
+                      <p className="text-green-600 text-sm mt-1">
+                        No security recommendations at this time. Your configuration looks good.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

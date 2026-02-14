@@ -2,6 +2,423 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as https from 'https';
 import * as tls from 'tls';
 
+// Security header recommendations database
+const HEADER_RECOMMENDATIONS: Record<string, {
+  description: string;
+  recommended: string;
+  impact: string;
+  apache: string;
+  nginx: string;
+  cloudflare: string;
+}> = {
+  'Strict-Transport-Security': {
+    description: 'Forces browsers to use HTTPS for all future requests to the domain, preventing protocol downgrade attacks and cookie hijacking.',
+    recommended: 'max-age=31536000; includeSubDomains; preload',
+    impact: 'Prevents man-in-the-middle attacks, SSL stripping, and ensures all traffic is encrypted.',
+    apache: 'Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"',
+    nginx: 'add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;',
+    cloudflare: 'Go to SSL/TLS → Edge Certificates → Enable "Always Use HTTPS" and configure HSTS in the dashboard'
+  },
+  'Content-Security-Policy': {
+    description: 'Controls which resources the browser is allowed to load, preventing XSS attacks and data injection.',
+    recommended: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';",
+    impact: 'Prevents cross-site scripting (XSS), clickjacking, and other code injection attacks.',
+    apache: `Header set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';"`,
+    nginx: `add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none';" always;`,
+    cloudflare: 'Use Transform Rules or Workers to add the header, or configure in Page Rules'
+  },
+  'X-Frame-Options': {
+    description: 'Prevents the page from being embedded in iframes, protecting against clickjacking attacks.',
+    recommended: 'DENY',
+    impact: 'Prevents clickjacking attacks where malicious sites overlay invisible iframes.',
+    apache: 'Header always set X-Frame-Options "DENY"',
+    nginx: 'add_header X-Frame-Options "DENY" always;',
+    cloudflare: 'Use Transform Rules → Modify Response Header → Add "X-Frame-Options: DENY"'
+  },
+  'X-Content-Type-Options': {
+    description: 'Prevents browsers from MIME-sniffing a response away from the declared content-type.',
+    recommended: 'nosniff',
+    impact: 'Prevents MIME type confusion attacks that could lead to XSS.',
+    apache: 'Header always set X-Content-Type-Options "nosniff"',
+    nginx: 'add_header X-Content-Type-Options "nosniff" always;',
+    cloudflare: 'Use Transform Rules → Modify Response Header → Add "X-Content-Type-Options: nosniff"'
+  },
+  'X-XSS-Protection': {
+    description: 'Legacy XSS filter built into older browsers. While deprecated, still useful for older browser support.',
+    recommended: '1; mode=block',
+    impact: 'Enables browser XSS filtering in legacy browsers that support it.',
+    apache: 'Header always set X-XSS-Protection "1; mode=block"',
+    nginx: 'add_header X-XSS-Protection "1; mode=block" always;',
+    cloudflare: 'Use Transform Rules → Modify Response Header → Add "X-XSS-Protection: 1; mode=block"'
+  },
+  'Referrer-Policy': {
+    description: 'Controls how much referrer information is included with requests.',
+    recommended: 'strict-origin-when-cross-origin',
+    impact: 'Prevents leaking sensitive URL data to third parties while maintaining functionality.',
+    apache: 'Header always set Referrer-Policy "strict-origin-when-cross-origin"',
+    nginx: 'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
+    cloudflare: 'Use Transform Rules → Modify Response Header → Add "Referrer-Policy: strict-origin-when-cross-origin"'
+  },
+  'Permissions-Policy': {
+    description: 'Controls which browser features and APIs can be used on the page.',
+    recommended: 'accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()',
+    impact: 'Limits attack surface by disabling potentially dangerous browser APIs.',
+    apache: 'Header always set Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"',
+    nginx: 'add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()" always;',
+    cloudflare: 'Use Transform Rules → Modify Response Header → Add the Permissions-Policy header'
+  }
+};
+
+interface Recommendation {
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  category: string;
+  title: string;
+  description: string;
+  fix: string;
+  impact: string;
+}
+
+function generateRecommendations(data: {
+  isIP: boolean;
+  whois?: any;
+  dns?: any;
+  ssl?: any;
+  security?: any;
+  email?: any;
+  blacklists?: any[];
+  ipWhois?: any;
+}): Recommendation[] {
+  const recommendations: Recommendation[] = [];
+
+  // SSL Recommendations
+  if (data.ssl && !data.ssl.error) {
+    if (data.ssl.daysRemaining !== undefined && data.ssl.daysRemaining <= 7) {
+      recommendations.push({
+        severity: 'critical',
+        category: 'SSL',
+        title: 'SSL Certificate Expiring Imminently',
+        description: `Your SSL certificate expires in ${data.ssl.daysRemaining} days. An expired certificate will cause browsers to show security warnings and block access.`,
+        fix: `# Renew your SSL certificate immediately
+
+# For Let's Encrypt with Certbot:
+sudo certbot renew --force-renewal
+
+# For other CAs, generate a new CSR:
+openssl req -new -newkey rsa:2048 -nodes -keyout domain.key -out domain.csr
+
+# Then submit to your CA and install the new certificate`,
+        impact: 'Prevents site access blocking, security warnings, and loss of user trust.'
+      });
+    } else if (data.ssl.daysRemaining !== undefined && data.ssl.daysRemaining <= 30) {
+      recommendations.push({
+        severity: 'high',
+        category: 'SSL',
+        title: 'SSL Certificate Expiring Soon',
+        description: `Your SSL certificate expires in ${data.ssl.daysRemaining} days. Plan renewal to avoid service disruption.`,
+        fix: `# Schedule SSL certificate renewal
+
+# For Let's Encrypt, verify auto-renewal is set up:
+sudo certbot renew --dry-run
+
+# Set up a cron job for automatic renewal:
+0 0 1 * * certbot renew --quiet`,
+        impact: 'Ensures uninterrupted HTTPS access and maintains user trust.'
+      });
+    }
+    
+    if (!data.ssl.valid) {
+      recommendations.push({
+        severity: 'critical',
+        category: 'SSL',
+        title: 'Invalid SSL Certificate',
+        description: 'Your SSL certificate is invalid. This could be due to expiration, hostname mismatch, or certificate chain issues.',
+        fix: `# Debug SSL certificate issues:
+openssl s_client -connect yourdomain.com:443 -servername yourdomain.com
+
+# Common fixes:
+# 1. Renew if expired
+# 2. Ensure certificate matches domain
+# 3. Install full certificate chain (intermediate certs)
+
+# Install intermediate certificates:
+cat your_certificate.crt intermediate.crt root.crt > fullchain.crt`,
+        impact: 'Browsers will block access to your site, causing complete loss of HTTPS traffic.'
+      });
+    }
+  }
+
+  // Security Headers Recommendations
+  if (data.security?.headers) {
+    const headers = data.security.headers;
+    
+    for (const [header, info] of Object.entries(headers) as [string, {present: boolean; value: string | null}][]) {
+      if (!info.present && HEADER_RECOMMENDATIONS[header]) {
+        const rec = HEADER_RECOMMENDATIONS[header];
+        const severity = header === 'Strict-Transport-Security' || header === 'Content-Security-Policy' 
+          ? 'high' 
+          : header === 'X-Frame-Options' || header === 'X-Content-Type-Options'
+            ? 'medium'
+            : 'low';
+        
+        recommendations.push({
+          severity,
+          category: 'Security Headers',
+          title: `Missing ${header}`,
+          description: rec.description,
+          fix: `# Recommended value:
+${rec.recommended}
+
+# Apache (.htaccess or httpd.conf):
+${rec.apache}
+
+# Nginx (server block):
+${rec.nginx}
+
+# Cloudflare:
+# ${rec.cloudflare}`,
+          impact: rec.impact
+        });
+      }
+    }
+    
+    if (data.security.score !== undefined && data.security.score < 50) {
+      recommendations.push({
+        severity: 'high',
+        category: 'Security Headers',
+        title: 'Low Security Score',
+        description: `Your security score is ${data.security.score}/100. Multiple security headers are missing, leaving your site vulnerable to various attacks.`,
+        fix: `# Add all recommended security headers at once
+
+# Apache - Add to .htaccess or httpd.conf:
+<IfModule mod_headers.c>
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    Header always set X-Frame-Options "DENY"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; frame-ancestors 'none';"
+</IfModule>
+
+# Nginx - Add to server block:
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+add_header X-Frame-Options "DENY" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-XSS-Protection "1; mode=block" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=()" always;`,
+        impact: 'Significantly improves protection against XSS, clickjacking, and other web attacks.'
+      });
+    }
+  }
+
+  // Email Authentication Recommendations
+  if (data.email) {
+    if (!data.email.spf?.valid) {
+      recommendations.push({
+        severity: 'high',
+        category: 'Email Auth',
+        title: 'Missing SPF Record',
+        description: 'SPF (Sender Policy Framework) is not configured. This allows attackers to spoof emails from your domain.',
+        fix: `# Add SPF record to your DNS
+
+# Basic SPF (allows your domain's MX servers):
+v=spf1 mx -all
+
+# If using Google Workspace:
+v=spf1 include:_spf.google.com -all
+
+# If using Microsoft 365:
+v=spf1 include:spf.protection.outlook.com -all
+
+# If using multiple providers:
+v=spf1 include:_spf.google.com include:sendgrid.net -all
+
+# Add as TXT record on your domain root (@)`,
+        impact: 'Prevents email spoofing and improves email deliverability.'
+      });
+    }
+
+    if (!data.email.dkim?.found) {
+      recommendations.push({
+        severity: 'medium',
+        category: 'Email Auth',
+        title: 'DKIM Not Detected',
+        description: 'DKIM (DomainKeys Identified Mail) signature was not found. DKIM cryptographically signs emails to verify authenticity.',
+        fix: `# DKIM setup varies by email provider
+
+# Google Workspace:
+# 1. Go to Apps → Google Workspace → Gmail → Authenticate Email
+# 2. Generate DKIM key
+# 3. Add the TXT record to DNS
+
+# Example DKIM record (selector: google):
+# Host: google._domainkey
+# Value: v=DKIM1; k=rsa; p=YOUR_PUBLIC_KEY
+
+# Microsoft 365:
+# 1. Go to Exchange Admin → Protection → DKIM
+# 2. Enable DKIM for your domain
+# 3. Add the provided CNAME records
+
+# Self-hosted: Use opendkim
+sudo apt install opendkim opendkim-tools
+opendkim-genkey -s default -d yourdomain.com`,
+        impact: 'Proves email authenticity and improves deliverability.'
+      });
+    }
+
+    if (!data.email.dmarc?.valid) {
+      recommendations.push({
+        severity: 'high',
+        category: 'Email Auth',
+        title: 'Missing DMARC Record',
+        description: 'DMARC is not configured. Without DMARC, receiving servers have no policy for handling emails that fail SPF/DKIM.',
+        fix: `# Add DMARC record to your DNS
+
+# Start with monitoring mode (recommended):
+v=DMARC1; p=none; rua=mailto:dmarc@yourdomain.com; ruf=mailto:dmarc@yourdomain.com; fo=1
+
+# After reviewing reports, move to quarantine:
+v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com; pct=100
+
+# Finally, enforce rejection:
+v=DMARC1; p=reject; rua=mailto:dmarc@yourdomain.com; pct=100
+
+# Add as TXT record on _dmarc.yourdomain.com`,
+        impact: 'Prevents email spoofing and phishing attacks using your domain.'
+      });
+    } else if (data.email.dmarc?.policy === 'none') {
+      recommendations.push({
+        severity: 'medium',
+        category: 'Email Auth',
+        title: 'DMARC Policy Set to None',
+        description: 'Your DMARC policy is set to "none", which only monitors but doesn\'t protect against spoofed emails.',
+        fix: `# Upgrade your DMARC policy
+
+# Review your DMARC reports first, then upgrade to quarantine:
+v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com; pct=25
+
+# Gradually increase pct to 100, then move to reject:
+v=DMARC1; p=reject; rua=mailto:dmarc@yourdomain.com; pct=100
+
+# Update the TXT record on _dmarc.yourdomain.com`,
+        impact: 'Enforces email authentication and blocks spoofed messages.'
+      });
+    }
+
+    if (!data.email.mx?.length) {
+      recommendations.push({
+        severity: 'low',
+        category: 'Email Auth',
+        title: 'No MX Records Found',
+        description: 'No mail exchange (MX) records are configured. The domain cannot receive email.',
+        fix: `# Add MX records to your DNS
+
+# For Google Workspace:
+@ MX 1 aspmx.l.google.com
+@ MX 5 alt1.aspmx.l.google.com
+@ MX 5 alt2.aspmx.l.google.com
+@ MX 10 alt3.aspmx.l.google.com
+@ MX 10 alt4.aspmx.l.google.com
+
+# For Microsoft 365:
+@ MX 0 yourdomain-com.mail.protection.outlook.com
+
+# For self-hosted:
+@ MX 10 mail.yourdomain.com`,
+        impact: 'Enables email delivery to the domain.'
+      });
+    }
+  }
+
+  // DNS/DNSSEC Recommendations
+  if (data.whois?.dnssec === 'unsigned') {
+    recommendations.push({
+      severity: 'medium',
+      category: 'DNS',
+      title: 'DNSSEC Not Enabled',
+      description: 'DNSSEC is not configured. DNS responses are not cryptographically signed, making them vulnerable to spoofing.',
+      fix: `# Enable DNSSEC with your registrar/DNS provider
+
+# Cloudflare (automatic):
+# 1. Go to DNS → Settings → Enable DNSSEC
+# 2. Add DS record to your registrar
+
+# For other providers, generate DNSSEC keys:
+dnssec-keygen -a RSASHA256 -b 2048 -n ZONE yourdomain.com
+dnssec-keygen -a RSASHA256 -b 4096 -n ZONE -f KSK yourdomain.com
+
+# Sign your zone and add DS record to parent
+
+# Verify with:
+dig +short DS yourdomain.com`,
+      impact: 'Protects against DNS spoofing and cache poisoning attacks.'
+    });
+  }
+
+  // CAA Records
+  if (data.dns?.CAA?.length === 0) {
+    recommendations.push({
+      severity: 'low',
+      category: 'DNS',
+      title: 'No CAA Records',
+      description: 'CAA (Certificate Authority Authorization) records are not set. Any CA could issue certificates for your domain.',
+      fix: `# Add CAA records to restrict certificate issuance
+
+# Allow only Let's Encrypt:
+@ CAA 0 issue "letsencrypt.org"
+@ CAA 0 issuewild "letsencrypt.org"
+@ CAA 0 iodef "mailto:security@yourdomain.com"
+
+# Allow Let's Encrypt and DigiCert:
+@ CAA 0 issue "letsencrypt.org"
+@ CAA 0 issue "digicert.com"
+@ CAA 0 issuewild "letsencrypt.org"
+@ CAA 0 iodef "mailto:security@yourdomain.com"
+
+# Verify with:
+dig CAA yourdomain.com`,
+      impact: 'Prevents unauthorized certificate issuance and potential MITM attacks.'
+    });
+  }
+
+  // Blacklist Recommendations
+  const listedBlacklists = data.blacklists?.filter(b => b.listed) || [];
+  if (listedBlacklists.length > 0) {
+    recommendations.push({
+      severity: 'critical',
+      category: 'Reputation',
+      title: `IP Listed on ${listedBlacklists.length} Blacklist${listedBlacklists.length > 1 ? 's' : ''}`,
+      description: `Your IP is listed on: ${listedBlacklists.map(b => b.name).join(', ')}. This can cause email delivery failures and reputation issues.`,
+      fix: `# Steps to delist your IP:
+
+${listedBlacklists.map(bl => `# ${bl.name} (${bl.host}):
+# Check listing reason: https://mxtoolbox.com/blacklists.aspx
+# Request removal at the blacklist's website`).join('\n\n')}
+
+# General steps:
+# 1. Identify and fix the cause (malware, spam, open relay)
+# 2. Scan server for malware: clamscan -r /
+# 3. Check for open relay: telnet yourserver 25
+# 4. Review mail logs: tail -f /var/log/mail.log
+# 5. Request delisting from each blacklist
+# 6. Monitor for re-listing
+
+# Spamhaus removal: https://www.spamhaus.org/lookup/
+# SpamCop removal: https://www.spamcop.net/bl.shtml
+# Barracuda removal: https://www.barracudacentral.org/lookups`,
+      impact: 'Restores email deliverability and domain reputation.'
+    });
+  }
+
+  // Sort by severity
+  const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+  recommendations.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+
+  return recommendations;
+}
+
 const isIP = (s: string) => /^(\d{1,3}\.){3}\d{1,3}$/.test(s.trim());
 const extractDomain = (s: string) => s.trim().toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0].split('?')[0];
 const calcAge = (c: string) => { try { const d = new Date(c); if (isNaN(d.getTime())) return null; const y = Math.floor((Date.now()-d.getTime())/(365.25*24*60*60*1000)); const m = Math.floor(((Date.now()-d.getTime())%(365.25*24*60*60*1000))/(30.44*24*60*60*1000)); return y>0?`${y}y ${m}m old`:`${m}m old`; } catch { return null; } };
@@ -265,7 +682,8 @@ export async function GET(req: NextRequest) {
         fetchSharedHosting(input),
         fetchIPWhois(input)
       ]);
-      return NextResponse.json({query:input,isIP:true,ip,security,blacklists,sharedHosting,ipWhois});
+      const recommendations = generateRecommendations({ isIP: true, security, blacklists, ipWhois });
+      return NextResponse.json({query:input,isIP:true,ip,security,blacklists,sharedHosting,ipWhois,recommendations});
     } else {
       const [whois,dns,ssl,security,subdomains,redirects] = await Promise.all([
         fetchWhois(input),
@@ -294,6 +712,7 @@ export async function GET(req: NextRequest) {
         ]);
       }
       
+      const recommendations = generateRecommendations({ isIP: false, whois, dns, ssl, security, email, blacklists, ipWhois });
       return NextResponse.json({
         query:input,
         isIP:false,
@@ -309,6 +728,7 @@ export async function GET(req: NextRequest) {
         ipWhois,
         subdomains,
         redirects,
+        recommendations,
         meta:{domainAge:calcAge(whois.created),timestamp:new Date().toISOString()}
       });
     }
